@@ -39,12 +39,12 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
-from diffuser.models import UNet2DConditionModel
+
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.14.0.dev0")
@@ -401,7 +401,7 @@ def main():
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision, num_class_embeds=4, class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
     )
 
     # Freeze vae and text_encoder
@@ -411,8 +411,8 @@ def main():
     # Create EMA for the unet.
     if args.use_ema:
         ema_unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision, num_class_embeds=4, class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None
-    )
+            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
+        )
         ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
 
     if args.enable_xformers_memory_efficient_attention:
@@ -453,7 +453,7 @@ def main():
                 model = models.pop()
 
                 # load diffusers style into model
-                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet", num_class_embeds=4, class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None)
+                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
                 model.register_to_config(**load_model.config)
 
                 model.load_state_dict(load_model.state_dict())
@@ -561,32 +561,6 @@ def main():
             captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
         )
         return inputs.input_ids
-    
-    def class_label_tensor(examples, is_train=True):
-        
-        def class_tokenizer(text):
-            class_names = ['C0201', 'R0201', 'L2016', 'F1210']
-            class_label = text 
-            num_classes = len(class_names)
-            class_vector = torch.zeros(num_classes, dtype=torch.int)
-            class_index = class_names.index(class_label)
-            class_vector[class_index] = 1
-            class_tensor = class_vector.view(1, num_classes)
-            return class_tensor
-        
-        captions = []
-        for caption in examples[caption_column]:
-            if isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                )
-        label_tensor = class_tokenizer(captions[0])
-        return label_tensor
 
     # Preprocessing the datasets.
     train_transforms = transforms.Compose(
@@ -603,7 +577,6 @@ def main():
         images = [image.convert("RGB") for image in examples[image_column]]
         examples["pixel_values"] = [train_transforms(image) for image in images]
         examples["input_ids"] = tokenize_captions(examples)
-        examples["class_label"] = class_label_tensor(examples)
         return examples
 
     with accelerator.main_process_first():
@@ -616,8 +589,7 @@ def main():
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
         input_ids = torch.stack([example["input_ids"] for example in examples])
-        class_label = torch.stack([example["class_label"] for example in examples])
-        return {"pixel_values": pixel_values, "input_ids": input_ids, "class_label": class_label}
+        return {"pixel_values": pixel_values, "input_ids": input_ids}
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -673,7 +645,6 @@ def main():
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         accelerator.init_trackers("text2image-fine-tune", config=vars(args))
-        
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -745,8 +716,6 @@ def main():
 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-                
-                class_tensor = batch["class_label"]
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -757,7 +726,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, class_labels=class_tensor).sample
+                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 # Gather the losses across all processes for logging (if we use distributed training).

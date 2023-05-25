@@ -400,15 +400,8 @@ def main():
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
-    unet = UNet2DConditionModel(
-        sample_size = 64, 
-        in_channels = 4, 
-        out_channels = 4, 
-        flip_sin_to_cos=True, 
-        num_class_embeds=4,
-        cross_attention_dim=768,
-        class_embed_type="None",
-        time_embedding_dim=320
+    unet = UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision, class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None
     )
 
     # Freeze vae and text_encoder
@@ -417,15 +410,8 @@ def main():
 
     # Create EMA for the unet.
     if args.use_ema:
-        ema_unet = UNet2DConditionModel(
-        sample_size = 64, 
-        in_channels = 4, 
-        out_channels = 4, 
-        flip_sin_to_cos=True, 
-        num_class_embeds=4,
-        cross_attention_dim=768,
-        class_embed_type="None",
-        time_embedding_dim=320
+        ema_unet = UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision, class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None
     )
         ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
 
@@ -467,16 +453,7 @@ def main():
                 model = models.pop()
 
                 # load diffusers style into model
-                load_model = UNet2DConditionModel(
-                                sample_size = 64, 
-                                in_channels = 4, 
-                                out_channels = 4, 
-                                flip_sin_to_cos=True, 
-                                num_class_embeds=4,
-                                cross_attention_dim=768,
-                                class_embed_type="None",
-                                time_embedding_dim=320
-                            )
+                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet", class_embed_type="timestep", low_cpu_mem_usage=False, device_map=None)
                 model.register_to_config(**load_model.config)
 
                 model.load_state_dict(load_model.state_dict())
@@ -588,7 +565,7 @@ def main():
     def class_label_tensor(examples, is_train=True):
         
         def class_tokenizer(text):
-            class_names = [['C0201'], ['R0201'], ['L2016'], ['F1210']]
+            class_names = ['C0201', 'R0201', 'L2016', 'F1210']
             class_label = text 
             num_classes = len(class_names)
             class_vector = torch.zeros(num_classes, dtype=torch.int)
@@ -608,7 +585,7 @@ def main():
                 raise ValueError(
                     f"Caption column `{caption_column}` should contain either strings or lists of strings."
                 )
-        label_tensor = class_tokenizer(captions)
+        label_tensor = class_tokenizer(captions[0])
         return label_tensor
 
     # Preprocessing the datasets.
